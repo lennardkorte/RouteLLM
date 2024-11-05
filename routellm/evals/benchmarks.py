@@ -310,11 +310,12 @@ class GSM8K(Benchmark):
         )
 
     def evaluate(self, controller, router, num_results, overwrite_router_cache):
-        if (
-            router not in self.cache
-            or router in self.overwrite_cache
-            or overwrite_router_cache
-        ):
+#        if (
+ #           router not in self.cache
+  #          or router in self.overwrite_cache
+   #         or overwrite_router_cache
+    #    ):
+        if True:
             strong_win_rates = controller.batch_calculate_win_rate(
                 prompts=self.all_data["prompt"], router=router
             )
@@ -324,7 +325,8 @@ class GSM8K(Benchmark):
             strong_win_rates = self.cache[router]
 
         # Choose thresholds split into 10 equally sized bins (including duplicates)
-        _, thresholds = pd.qcut(strong_win_rates, num_results, retbins=True)
+        #_, thresholds = pd.qcut(strong_win_rates, num_results, retbins=True)
+        _, thresholds = pd.qcut(strong_win_rates, num_results, retbins=True, duplicates="drop") # Handle naive cost sensitive router
         self.all_data["strong_win_rates"] = strong_win_rates
 
         for i, threshold in enumerate(thresholds):

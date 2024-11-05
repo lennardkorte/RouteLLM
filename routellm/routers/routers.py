@@ -253,11 +253,58 @@ class RandomRouter(Router):
         return random.uniform(0, 1)
 
 
+class CostSensitiveRouter(Router):
+
+    # Using random generation
+#    def calculate_strong_win_rate(self, prompt):
+ #       win_rate = random.uniform(0, 1) 
+  #      print(f"Calculated win rate for prompt '{prompt}': {win_rate}")
+   #     return win_rate
+
+    # Using a naive complexity scoring method 
+    def calculate_strong_win_rate(self, prompt):
+        # Base win rate
+        base_win_rate = 0.5
+
+        # Word count adjustment
+        word_count = len(prompt.split())
+        word_count_adjustment = 0.05 if word_count > 10 else 0
+
+        # Average word length adjustment
+        avg_word_length = sum(len(word) for word in prompt.split()) / word_count
+        word_length_adjustment = 0.05 if avg_word_length > 5 else 0
+
+        # Sentence count adjustment
+        sentence_count = prompt.count('.') + prompt.count('!') + prompt.count('?')
+        sentence_count_adjustment = 0.1 if sentence_count > 1 else 0
+
+        # Calculate the final win rate
+        win_rate = base_win_rate + word_count_adjustment + word_length_adjustment + sentence_count_adjustment
+        win_rate = min(win_rate, 1.0)  # Ensure win rate does not exceed 1.0
+
+        print(f"Calculated win rate for prompt '{prompt}': {win_rate}")
+        return win_rate
+
+    def route(self, prompt, routed_pair):
+        win_rate = self.calculate_strong_win_rate(prompt)
+
+        # Set a fixed threshold instead of dynamically adjusting it again
+        threshold = 0.5  # Adjust based on experimentation
+
+        print(f"Win rate: {win_rate}, Threshold: {threshold}")
+
+        if win_rate >= threshold:
+            return routed_pair.strong
+        else:  
+            return routed_pair.weak
+
+
 ROUTER_CLS = {
     "random": RandomRouter,
     "mf": MatrixFactorizationRouter,
     "causal_llm": CausalLLMRouter,
     "bert": BERTRouter,
     "sw_ranking": SWRankingRouter,
+    "cost_sensitive": CostSensitiveRouter
 }
 NAME_TO_CLS = {v: k for k, v in ROUTER_CLS.items()}
