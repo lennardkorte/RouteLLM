@@ -118,12 +118,12 @@ class MFModel(torch.nn.Module, PyTorchModelHubMixin):
         prompt_embed = self.text_proj(prompt_embed)
 
         return self.classifier(model_embed * prompt_embed).squeeze()
-
+    
     @torch.no_grad()
-    def pred_win_rate(self, model_a, model_b, prompt):
-        logits = self.forward([model_a, model_b], prompt)
-        winrate = torch.sigmoid(logits[0] - logits[1]).item()
-        return winrate
+    def predict_model_scores(self, model_ids, prompt):
+        logits = self.forward(model_ids, prompt)
+        probabilities = torch.softmax(logits, dim=0)  # Convert scores to probabilities
+        return probabilities
 
     def load(self, path):
         self.load_state_dict(torch.load(path))

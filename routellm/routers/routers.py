@@ -211,10 +211,7 @@ class MatrixFactorizationRouter(Router):
     def __init__(
         self,
         checkpoint_path,
-        # This is the model pair for scoring at inference time,
-        # and can be different from the model pair used for routing.
-        strong_model="gpt-4-1106-preview",
-        weak_model="mixtral-8x7b-instruct-v0.1",
+        model_list,
         hidden_size=128,
         num_models=64,
         text_dim=1536,
@@ -232,14 +229,15 @@ class MatrixFactorizationRouter(Router):
             use_proj=use_proj,
         )
         self.model = self.model.eval().to(device)
-        self.strong_model_id = MODEL_IDS[strong_model]
-        self.weak_model_id = MODEL_IDS[weak_model]
+        self.model_ids = [MODEL_IDS[model] for model in model_list]
 
-    def calculate_strong_win_rate(self, prompt):
-        winrate = self.model.pred_win_rate(
-            self.strong_model_id, self.weak_model_id, prompt
+    def rank_models_for_prompt(self, prompt):
+        scores = self.model.predict_model_scores(self.model_ids, prompt)
+        ranked_models = sorted(
+            zip([list(MODEL_IDS.keys())[i] for i in self.model_ids], scores), key=lambda x: x[1], reverse=True
         )
-        return winrate
+        return ranked_models
+
 
 
 # Parallelism makes the randomness non deterministic

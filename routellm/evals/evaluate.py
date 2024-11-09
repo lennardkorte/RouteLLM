@@ -15,11 +15,11 @@ from routellm.routers.routers import ROUTER_CLS
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-
 def generate_results(
-    df_router_result, benchmark, benchmark_name, routed_pair, output, plot_optimal=False
+    df_router_result, benchmark, benchmark_name, model_set, output, plot_optimal=False
 ):
     plt.figure(figsize=(6, 5))
+    
     for method in df_router_result["method"].unique():
         df_per_method = df_router_result[
             df_router_result["method"] == method
@@ -33,25 +33,19 @@ def generate_results(
             linestyle="-",
         )
 
-    weak_accuracy = benchmark.get_model_accuracy(routed_pair.weak)
-    print(f"{routed_pair.weak} score: {weak_accuracy}")
+    # Plot individual model accuracies for each model in model_set
+    model_accuracies = {}
+    for model in model_set.models:
+        accuracy = benchmark.get_model_accuracy(model)
+        model_accuracies[model] = accuracy
+        print(f"{model} score: {accuracy}")
+        plt.axhline(
+            y=accuracy,
+            linestyle="--",
+            label=model,
+        )
 
-    strong_accuracy = benchmark.get_model_accuracy(routed_pair.strong)
-    print(f"{routed_pair.strong} score: {strong_accuracy}")
-
-    plt.axhline(
-        y=weak_accuracy,
-        color="grey",
-        linestyle="--",
-        label=routed_pair.weak,
-    )
-    plt.axhline(
-        y=strong_accuracy,
-        color="red",
-        linestyle="--",
-        label=routed_pair.strong,
-    )
-
+    # Optional: Plot optimal line
     if plot_optimal:
         optimal_accs = []
         optimal_range = range(0, 101, 10)
@@ -65,7 +59,7 @@ def generate_results(
             linestyle="-",
         )
 
-    plt.xlabel("Strong Model Calls (%)")
+    plt.xlabel("Model Calls (%)")
     plt.ylabel("Performance")
     plt.title(f"Router Performance ({benchmark_name})")
     plt.legend()
@@ -78,67 +72,81 @@ def generate_results(
         df_per_method = df_router_result[
             df_router_result["method"] == row["method"]
         ].sort_values(by=["strong_percentage"])
+
         pct_calls = []
-
         for pct in [0.2, 0.5, 0.8]:
-            pct_call = np.interp(
-                pct * (strong_accuracy - weak_accuracy) + weak_accuracy,
-                df_per_method["accuracy"],
-                df_per_method["strong_percentage"],
-            )
-            pct_calls.append(f"{pct_call:.2f}%")
-
+            model_calls = {}
+            for model, accuracy in model_accuracies.items():
+                # Interpolate percentage of calls for each model at different accuracy levels
+                pct_call = np.interp(
+                    pct * (accuracy - model_accuracies[model_set.models[0]]) + model_accuracies[model_set.models[0]],
+                    df_per_method["accuracy"],
+                    df_per_method["strong_percentage"],
+                )
+                model_calls[model] = f"{pct_call:.2f}%"
+            pct_calls.append(model_calls)
         return pd.Series(pct_calls)
 
     def auc_metric(row):
         df_per_method = df_router_result[
             df_router_result["method"] == row["method"]
         ].sort_values(by=["strong_percentage"])
-        return np.trapz(
-            df_per_method["accuracy"], df_per_method["strong_percentage"] / 100
-        )
+        auc_values = {}
+        for model in model_set.models:
+            # Compute AUC for each model
+            auc_values[model] = np.trapz(
+                df_per_method["accuracy"], df_per_method["strong_percentage"] / 100
+            )
+        return auc_values
 
     def apgr_metric(row):
         df_per_method = df_router_result[
             df_router_result["method"] == row["method"]
         ].sort_values(by=["strong_percentage"])
 
-        weak_auc = np.zeros([len(df_per_method)], dtype=float)
-        weak_auc.fill(weak_accuracy)
-        weak_auc = np.trapz(weak_auc, df_per_method["strong_percentage"] / 100)
+        apgr_values = {}
+        for model, accuracy in model_accuracies.items():
+            # Compute APGR for each model
+            weak_auc = np.zeros([len(df_per_method)], dtype=float)
+            weak_auc.fill(model_accuracies[model_set.models[0]])  # Using the first model as baseline
+            weak_auc = np.trapz(weak_auc, df_per_method["strong_percentage"] / 100)
 
-        strong_auc = np.zeros([len(df_per_method)], dtype=float)
-        strong_auc.fill(strong_accuracy)
-        strong_auc = np.trapz(strong_auc, df_per_method["strong_percentage"] / 100)
+            strong_auc = np.zeros([len(df_per_method)], dtype=float)
+            strong_auc.fill(accuracy)
+            strong_auc = np.trapz(strong_auc, df_per_method["strong_percentage"] / 100)
 
-        return (row["AUC"] - weak_auc) / (strong_auc - weak_auc)
+            apgr_values[model] = (row["AUC"][model] - weak_auc) / (strong_auc - weak_auc)
+        return apgr_values
 
+    # Create metrics DataFrame for all models
     metrics = pd.DataFrame({"method": df_router_result["method"].unique()})
     metrics[["20% qual", "50% qual", "80% qual"]] = metrics.apply(
         pct_call_metric, axis=1
     )
     metrics["AUC"] = metrics.apply(auc_metric, axis=1)
     metrics["APGR"] = metrics.apply(apgr_metric, axis=1)
-    metrics = metrics.sort_values(by=["APGR"], ascending=False)
 
     with pd.option_context("display.max_rows", None, "display.max_columns", None):
         print("Metrics:\n", metrics)
 
-
 def pretty_print_results(threshold, accuracy, model_counts, total):
     header = (
         "=" * 15
-        + f" {router} with threshold {threshold} on {args.benchmark} "
+        + f" Router with threshold {threshold} on {args.benchmark} "
         + "=" * 15
     )
     print("\n" + header)
     print("Average accuracy: {:.3f}".format(accuracy))
-    print(f"Model counts: {', '.join([f'{k}: {v}' for k, v in model_counts.items()])}")
-    print(
-        f"Model %: {', '.join([f'{k}: {v / total * 100:.3f}%' for k, v in model_counts.items()])}"
-    )
-    print("=" * len(header) + "\n")
 
+    # Print the counts for each model
+    model_counts_str = ', '.join([f"{model}: {count}" for model, count in model_counts.items()])
+    print(f"Model counts: {model_counts_str}")
+
+    # Print the percentage usage for each model
+    model_percentages_str = ', '.join([f"{model}: {count / total * 100:.3f}%" for model, count in model_counts.items()])
+    print(f"Model %: {model_percentages_str}")
+
+    print("=" * len(header) + "\n")
 
 if __name__ == "__main__":
     import argparse
@@ -180,11 +188,13 @@ if __name__ == "__main__":
         default=psutil.cpu_count(logical=False),
         help="Number of cores to use, all by default.",
     )
-    parser.add_argument("--strong-model", type=str, default="gpt-4-1106-preview")
     parser.add_argument(
-        "--weak-model",
+        "--models",
+        nargs="+",  # This allows multiple model names to be passed as a list
         type=str,
-        default="mistralai/Mixtral-8x7B-Instruct-v0.1",
+        default=["gpt-4-1106-preview", "mistralai/Mixtral-8x7B-Instruct-v0.1"],
+        required=True,  # Make it required if necessary
+        help="List of model names to be used in routing",
     )
     parser.add_argument("--config", type=str, default=None)
     parser.add_argument("--num-results", type=int, default=10)
@@ -197,21 +207,20 @@ if __name__ == "__main__":
     controller = Controller(
         routers=args.routers,
         config=yaml.safe_load(open(args.config, "r")) if args.config else None,
-        strong_model=args.strong_model,
-        weak_model=args.weak_model,
+        models=args.models,
         progress_bar=True,
     )
 
     if args.benchmark == "mmlu":
         print("Running eval for full MMLU.")
         mmlu_domains = ALL_MMLU_DOMAINS
-        benchmark = MMLU(mmlu_domains, controller.model_pair, args.overwrite_cache)
+        benchmark = MMLU(mmlu_domains, controller.model_set, args.overwrite_cache)
     elif args.benchmark == "mt-bench":
         print("Running eval for MT Bench.")
-        benchmark = MTBench(controller.model_pair, args.overwrite_cache)
+        benchmark = MTBench(controller.model_set, args.overwrite_cache)
     elif args.benchmark == "gsm8k":
         print("Running eval for GSM8k.")
-        benchmark = GSM8K(controller.model_pair, args.overwrite_cache)
+        benchmark = GSM8K(controller.model_set, args.overwrite_cache)
     else:
         raise ValueError(f"Invalid benchmark {args.benchmark}")
 

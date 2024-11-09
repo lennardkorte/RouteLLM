@@ -44,8 +44,8 @@ class Benchmark(abc.ABC):
 
 
 class MMLU(Benchmark):
-    def __init__(self, domains, routed_pair, overwrite_cache):
-        self.routed_pair = routed_pair
+    def __init__(self, domains, model_set, overwrite_cache):
+        self.model_set = model_set  # ModelSet containing multiple models
         self.overwrite_cache = overwrite_cache
         self.cache_path = f"{CURRENT_DIR}/mmlu/cache.npy"
 
@@ -65,7 +65,7 @@ class MMLU(Benchmark):
             )
         original_length = len(all_data)
 
-        # Generated using contamination_check.py
+        # Filter out contaminated prompts
         contaminated_prompts = pd.read_json(
             f"{CURRENT_DIR}/mmlu/contaminated_prompts.jsonl", lines=True
         )["eval_prompt"].tolist()
@@ -75,92 +75,87 @@ class MMLU(Benchmark):
         )
 
     def evaluate(self, controller, router, num_results, overwrite_router_cache):
+        # Calculate or load router scores for each prompt
         if (
             router not in self.cache
             or router in self.overwrite_cache
             or overwrite_router_cache
         ):
-            strong_win_rates = controller.batch_calculate_win_rate(
+            model_scores = controller.batch_calculate_scores(
                 prompts=self.all_data["prompt"], router=router
             )
-            self.cache[router] = strong_win_rates
+            self.cache[router] = model_scores
             np.save(self.cache_path, self.cache)
         else:
-            strong_win_rates = self.cache[router]
+            model_scores = self.cache[router]
 
-        # Choose thresholds split into 10 equally sized bins (including duplicates)
-        _, thresholds = pd.qcut(strong_win_rates, num_results, retbins=True)
-        self.all_data["strong_win_rates"] = strong_win_rates
+        # For each threshold, rank models dynamically for each prompt
+        thresholds = np.linspace(0, 1, num_results)
+        results_data = []
 
-        for i, threshold in enumerate(thresholds):
-            selection = (
-                self.all_data["strong_win_rates"] >= threshold
-                if i != len(thresholds) - 1
-                else self.all_data["strong_win_rates"] > threshold
-            )
-            results = np.where(
-                selection,
-                self.all_data[self.routed_pair.strong],
-                self.all_data[self.routed_pair.weak],
-            )
-            models = np.where(
-                selection,
-                self.routed_pair.strong,
-                self.routed_pair.weak,
-            )
-            model_counts = Counter(models)
-            yield threshold, sum(results) / len(results) * 100, model_counts, len(
-                results
-            )
+        for threshold in thresholds:
+            selected_models = []
+            model_accuracies = []
+
+            for prompt, scores in zip(self.all_data["prompt"], model_scores):
+                # Rank models based on score and apply threshold
+                ranked_models = sorted(zip(self.model_set.models, scores), key=lambda x: x[1], reverse=True)
+                selected_model = next((model for model, score in ranked_models if score >= threshold), ranked_models[0][0])
+                selected_models.append(selected_model)
+
+                # Check if selected model was correct
+                is_correct = self.all_data.loc[self.all_data["prompt"] == prompt, selected_model].values[0]
+                model_accuracies.append(is_correct)
+
+            accuracy = np.mean(model_accuracies) * 100
+            model_counts = Counter(selected_models)
+            results_data.append({
+                "threshold": threshold,
+                "accuracy": accuracy,
+                "model_counts": model_counts,
+                "total": len(model_accuracies),
+            })
+            yield threshold, accuracy, model_counts, len(model_accuracies)
 
     def get_optimal_accuracy(self, strong_percent):
-        df = self.all_data
-        total = len(df)
+        # Calculate optimal accuracy by selecting highest-performing models up to strong_percent
+        total = len(self.all_data)
+        max_strong_calls = int(total * strong_percent)
 
-        strong_calls = total * strong_percent
-        weak_correct = len(df[df[self.routed_pair.weak] == True])
-
-        df_sub = df[df[self.routed_pair.weak] == False]
-        df_sub = df_sub[df_sub[self.routed_pair.strong] == True]
-
-        strong_bonus = min(strong_calls, len(df_sub))
-        opt_correct = weak_correct + strong_bonus
-        opt_accuracy = opt_correct / total * 100
-
+        strong_model_correct = {model: self.all_data[model].sum() for model in self.model_set.models}
+        sorted_models = sorted(strong_model_correct.items(), key=lambda x: x[1], reverse=True)
+        
+        # Sum optimal performance of selected top-performing models
+        optimal_correct = sum(count for model, count in sorted_models[:max_strong_calls])
+        opt_accuracy = optimal_correct / total * 100
         return opt_accuracy
 
     def get_model_accuracy(self, model):
-        df = self.all_data
-        return len(df[df[model] == True]) / len(df) * 100
-
+        # Return the accuracy of a specific model on the MMLU dataset
+        return len(self.all_data[self.all_data[model] == True]) / len(self.all_data) * 100
 
 class MTBench(Benchmark):
-    def __init__(self, routed_pair, overwrite_cache):
-        self.routed_pair = routed_pair
-
-        self.judgements = pd.read_json(
-            f"{CURRENT_DIR}/mt_bench/judgements.jsonl", lines=True
-        )
-        self.questions = pd.read_json(
-            f"{CURRENT_DIR}/mt_bench/question.jsonl", lines=True
-        )
-        contaminated_prompts = pd.read_json(
-            f"{CURRENT_DIR}/mt_bench/contaminated_prompts.jsonl", lines=True
-        )["eval_prompt"].tolist()
-
-        self.questions["turn1"] = self.questions["turns"].apply(lambda x: x[0])
-        self.questions["turn2"] = self.questions["turns"].apply(lambda x: x[1])
-        self.questions = self.questions[
-            ~(
-                self.questions["turn1"].isin(contaminated_prompts)
-                | self.questions["turn2"].isin(contaminated_prompts)
-            )
-        ]
-        print(f"{len(self.questions)} questions for MT bench after decontamination.")
-
+    def __init__(self, model_set, overwrite_cache):
+        self.model_set = model_set  # ModelSet containing multiple models
         self.overwrite_cache = overwrite_cache
         self.cache_path = f"{CURRENT_DIR}/mt_bench/cache.npy"
 
+        # Load judgements and questions
+        self.judgements = pd.read_json(f"{CURRENT_DIR}/mt_bench/judgements.jsonl", lines=True)
+        self.questions = pd.read_json(f"{CURRENT_DIR}/mt_bench/question.jsonl", lines=True)
+
+        # Filter out contaminated prompts
+        contaminated_prompts = pd.read_json(
+            f"{CURRENT_DIR}/mt_bench/contaminated_prompts.jsonl", lines=True
+        )["eval_prompt"].tolist()
+        self.questions["turn1"] = self.questions["turns"].apply(lambda x: x[0])
+        self.questions["turn2"] = self.questions["turns"].apply(lambda x: x[1])
+        self.questions = self.questions[
+            ~(self.questions["turn1"].isin(contaminated_prompts) | self.questions["turn2"].isin(contaminated_prompts))
+        ]
+        print(f"{len(self.questions)} questions for MT bench after decontamination.")
+
+        # Load or initialize cache
         try:
             self.cache = np.load(self.cache_path, allow_pickle=True).item()
         except:
@@ -168,61 +163,49 @@ class MTBench(Benchmark):
             self.cache = {}
 
     def evaluate(self, controller, router, num_results, overwrite_router_cache):
+        # Get or calculate router scores for each prompt
         if (
             router not in self.cache
             or router in self.overwrite_cache
             or overwrite_router_cache
         ):
-            strong_win_rates = controller.batch_calculate_win_rate(
-                # Only use first turn for routing
-                prompts=self.questions["turns"].apply(lambda x: x[0]),
+            model_scores = controller.batch_calculate_scores(
+                prompts=self.questions["turns"].apply(lambda x: x[0]),  # First turn only
                 router=router,
             )
-            self.cache[router] = strong_win_rates
+            self.cache[router] = model_scores
             np.save(self.cache_path, self.cache)
         else:
-            strong_win_rates = self.cache[router]
+            model_scores = self.cache[router]
 
-        _, thresholds = pd.qcut(strong_win_rates, num_results, retbins=True)
-        questions = self.questions[["question_id", "turns"]]
-        questions["strong_win_rates"] = strong_win_rates
+        thresholds = np.linspace(0, 1, num_results)
+        for threshold in thresholds:
+            selected_models = []
+            scores = []
 
-        for i, threshold in enumerate(thresholds):
-            questions["routed_model"] = np.where(
-                (
-                    questions["strong_win_rates"] >= threshold
-                    if i != len(thresholds) - 1
-                    else questions["strong_win_rates"] > threshold
-                ),
-                self.routed_pair.strong,
-                self.routed_pair.weak,
-            )
+            # Select the best model per prompt based on the threshold
+            for question_id, scores_for_question in zip(self.questions["question_id"], model_scores):
+                ranked_models = sorted(zip(self.model_set.models, scores_for_question), key=lambda x: x[1], reverse=True)
+                selected_model = next((model for model, score in ranked_models if score >= threshold), ranked_models[0][0])
+                selected_models.append(selected_model)
 
-            results = questions.merge(
-                self.judgements,
-                left_on=["question_id", "routed_model"],
-                right_on=["question_id", "model"],
-                how="left",
-            )[["question_id", "model", "score"]]
+                # Get score for the selected model on this question
+                score = self.judgements.loc[
+                    (self.judgements["question_id"] == question_id) & (self.judgements["model"] == selected_model),
+                    "score",
+                ]
+                if not score.empty:
+                    scores.append(score.iloc[0])
 
-            score = results["score"].mean()
-
-            model_counts = results["model"].value_counts().to_dict()
-            if self.routed_pair.weak not in model_counts:
-                model_counts[self.routed_pair.weak] = 0
-            if self.routed_pair.strong not in model_counts:
-                model_counts[self.routed_pair.strong] = 0
-
-            total = len(results)
-
-            assert total == sum(model_counts.values()) == len(self.questions) * 2
-
-            yield threshold, score, model_counts, total
+            # Calculate mean score and model distribution
+            mean_score = np.mean(scores) if scores else 0
+            model_counts = Counter(selected_models)
+            yield threshold, mean_score, model_counts, len(selected_models)
 
     def get_model_accuracy(self, model):
+        # Calculate the mean score for a specific model across all questions
         questions = self.questions[["question_id"]]
         questions["routed_model"] = model
-
         results = questions.merge(
             self.judgements,
             left_on=["question_id", "routed_model"],
@@ -235,61 +218,25 @@ class MTBench(Benchmark):
     def get_optimal_accuracy(self, strong_percent):
         max_strong_calls = int(len(self.questions) * strong_percent)
 
-        strong_judgements = (
-            self.judgements[self.judgements["model"] == self.routed_pair.strong][
-                ["question_id", "model", "score"]
-            ]
-            .groupby(by=["model", "question_id"], as_index=False)
-            .mean()
-        )
-
-        weak_judgements = (
-            self.judgements[self.judgements["model"] == self.routed_pair.weak][
-                [
-                    "question_id",
-                    "model",
-                    "score",
-                ]
-            ]
-            .groupby(by=["model", "question_id"], as_index=False)
-            .mean()
-        )
-
-        combined_judgements = strong_judgements.merge(
-            weak_judgements,
-            on=["question_id"],
-            how="left",
-            suffixes=("_strong", "_weak"),
-        )
-        combined_judgements["diff"] = (
-            combined_judgements["score_strong"] - combined_judgements["score_weak"]
-        )
-        combined_judgements = combined_judgements.sort_values(
-            by=["diff"], ascending=False
-        ).reset_index(drop=True)
-
-        if len(combined_judgements[combined_judgements["diff"] > 0]) > max_strong_calls:
-            combined_judgements.loc[:max_strong_calls, "score_optimal"] = (
-                combined_judgements.loc[:max_strong_calls, "score_strong"]
+        # Get mean score per model across questions
+        model_performance = {}
+        for model in self.model_set.models:
+            model_performance[model] = (
+                self.judgements[self.judgements["model"] == model]["score"].mean()
             )
-            combined_judgements.loc[max_strong_calls:, "score_optimal"] = (
-                combined_judgements.loc[max_strong_calls:, "score_weak"]
-            )
-        else:
-            combined_judgements["score_optimal"] = combined_judgements[
-                "score_strong"
-            ].where(combined_judgements["diff"] > 0, combined_judgements["score_weak"])
 
-        assert (
-            len(strong_judgements) == len(weak_judgements) == len(combined_judgements)
-        )
+        # Sort models by their mean scores
+        sorted_models = sorted(model_performance.items(), key=lambda x: x[1], reverse=True)
 
-        return combined_judgements["score_optimal"].mean()
+        # Sum the scores of the top-performing models based on the strong percentage
+        top_scores = [score for _, score in sorted_models[:max_strong_calls]]
+        optimal_score = sum(top_scores) / len(self.questions)
 
+        return optimal_score
 
 class GSM8K(Benchmark):
-    def __init__(self, routed_pair, overwrite_cache):
-        self.routed_pair = routed_pair
+    def __init__(self, model_set, overwrite_cache):
+        self.model_set = model_set  # ModelSet with multiple models
         self.overwrite_cache = overwrite_cache
         self.cache_path = f"{CURRENT_DIR}/gsm8k/cache.npy"
 
@@ -301,6 +248,7 @@ class GSM8K(Benchmark):
         all_data = pd.read_csv(f"{CURRENT_DIR}/gsm8k/gsm8k_responses.csv")
         original_len = len(all_data)
 
+        # Remove contaminated prompts
         contaminated_prompts = pd.read_json(
             f"{CURRENT_DIR}/gsm8k/contaminated_prompts.jsonl", lines=True
         )["eval_prompt"].tolist()
@@ -310,56 +258,65 @@ class GSM8K(Benchmark):
         )
 
     def evaluate(self, controller, router, num_results, overwrite_router_cache):
+        # Load or compute router scores for each prompt
         if (
             router not in self.cache
             or router in self.overwrite_cache
             or overwrite_router_cache
         ):
-            strong_win_rates = controller.batch_calculate_win_rate(
+            model_scores = controller.batch_calculate_scores(
                 prompts=self.all_data["prompt"], router=router
             )
-            self.cache[router] = strong_win_rates
+            self.cache[router] = model_scores
             np.save(self.cache_path, self.cache)
         else:
-            strong_win_rates = self.cache[router]
+            model_scores = self.cache[router]
 
-        # Choose thresholds split into 10 equally sized bins (including duplicates)
-        _, thresholds = pd.qcut(strong_win_rates, num_results, retbins=True)
-        self.all_data["strong_win_rates"] = strong_win_rates
+        # Define thresholds to split the score range for evaluation
+        thresholds = np.linspace(0, 1, num_results)
+        results_data = []
 
-        for i, threshold in enumerate(thresholds):
-            selection = (
-                self.all_data["strong_win_rates"] >= threshold
-                if i != len(thresholds) - 1
-                else self.all_data["strong_win_rates"] > threshold
-            )
-            results = np.where(
-                selection,
-                self.all_data[self.routed_pair.strong],
-                self.all_data[self.routed_pair.weak],
-            )
-            models = np.where(selection, self.routed_pair.strong, self.routed_pair.weak)
-            model_counts = Counter(models)
-            yield threshold, sum(results) / len(results) * 100, model_counts, len(
-                results
-            )
+        for threshold in thresholds:
+            selected_models = []
+            model_accuracies = []
+
+            for prompt, scores in zip(self.all_data["prompt"], model_scores):
+                # Rank models by scores and apply threshold
+                ranked_models = sorted(zip(self.model_set.models, scores), key=lambda x: x[1], reverse=True)
+                selected_model = next((model for model, score in ranked_models if score >= threshold), ranked_models[0][0])
+                selected_models.append(selected_model)
+
+                # Check if the selected model answered correctly
+                is_correct = self.all_data.loc[self.all_data["prompt"] == prompt, selected_model].values[0]
+                model_accuracies.append(is_correct)
+
+            # Calculate accuracy and model counts for the threshold
+            accuracy = np.mean(model_accuracies) * 100
+            model_counts = Counter(selected_models)
+            results_data.append({
+                "threshold": threshold,
+                "accuracy": accuracy,
+                "model_counts": model_counts,
+                "total": len(model_accuracies),
+            })
+            yield threshold, accuracy, model_counts, len(model_accuracies)
 
     def get_model_accuracy(self, model):
+        # Calculate accuracy for a specific model
         df = self.all_data
         return len(df[df[model] == True]) / len(df) * 100
 
     def get_optimal_accuracy(self, strong_percent):
+        # Calculate optimal accuracy by selecting best-performing models up to strong_percent
         df = self.all_data
         total = len(df)
+        max_strong_calls = int(total * strong_percent)
 
-        strong_calls = total * strong_percent
-        weak_correct = len(df[df[self.routed_pair.weak] == True])
+        # Count correct answers for each model
+        model_correct_counts = {model: df[model].sum() for model in self.model_set.models}
+        sorted_models = sorted(model_correct_counts.items(), key=lambda x: x[1], reverse=True)
 
-        df_sub = df[df[self.routed_pair.weak] == False]
-        df_sub = df_sub[df_sub[self.routed_pair.strong] == True]
-
-        strong_bonus = min(strong_calls, len(df_sub))
-        opt_correct = weak_correct + strong_bonus
-        opt_accuracy = opt_correct / total * 100
-
+        # Sum the correct answers from top-performing models
+        optimal_correct = sum(count for model, count in sorted_models[:max_strong_calls])
+        opt_accuracy = optimal_correct / total * 100
         return opt_accuracy

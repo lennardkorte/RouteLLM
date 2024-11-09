@@ -140,6 +140,11 @@ venv.bak/
 # Rope project settings
 .ropeproject
 
+.secrets
+2406.18665v3.pdf
+test.py
+.DS_Store
+
 # mkdocs documentation
 /site
 

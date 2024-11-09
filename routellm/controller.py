@@ -33,23 +33,21 @@ class RoutingError(Exception):
 
 
 @dataclass
-class ModelPair:
-    strong: str
-    weak: str
+class ModelSet:
+    models: list[str]
 
 
 class Controller:
     def __init__(
         self,
         routers: list[str],
-        strong_model: str,
-        weak_model: str,
+        models: list[str],
         config: Optional[dict[str, dict[str, Any]]] = None,
         api_base: Optional[str] = None,
         api_key: Optional[str] = None,
         progress_bar: bool = False,
     ):
-        self.model_pair = ModelPair(strong=strong_model, weak=weak_model)
+        self.model_set = ModelSet(models=models)
         self.routers = {}
         self.api_base = api_base
         self.api_key = api_key
@@ -102,38 +100,41 @@ class Controller:
             )
         return router, threshold
 
-    def _get_routed_model_for_completion(
-        self, messages: list, router: str, threshold: float
-    ):
-        # Look at the last turn for routing.
-        # Our current routers were only trained on first turn data, so more research is required here.
+    def _get_routed_model_for_completion(self, messages: list, router: str, threshold: float):
         prompt = messages[-1]["content"]
-        routed_model = self.routers[router].route(prompt, threshold, self.model_pair)
+        
+        # Obtain sorted list of models with scores
+        model_scores = self.routers[router].rank_models_for_prompt(prompt, self.model_set.models)
 
-        self.model_counts[router][routed_model] += 1
+        # Check if model_scores is empty and raise an error if no models returned
+        if not model_scores:
+            raise RoutingError("No models returned from rank_models_for_prompt.")
 
-        return routed_model
+        # Iterate through sorted model_scores, return the first that meets or exceeds the threshold
+        for model, score in model_scores:
+            if score >= threshold:
+                self.model_counts[router][model] += 1  # Track usage for each model
+                return model
+
+        # If no model meets the threshold, return the highest scoring model as a fallback
+        fallback_model = model_scores[0][0]
+        self.model_counts[router][fallback_model] += 1
+        return fallback_model
 
     # Mainly used for evaluations
-    def batch_calculate_win_rate(
-        self,
-        prompts: pd.Series,
-        router: str,
-    ):
-        self._validate_router_threshold(router, 0)
+    def batch_calculate_scores(self, prompts: pd.Series, router: str):
         router_instance = self.routers[router]
         if router_instance.NO_PARALLEL and self.progress_bar:
-            return prompts.progress_apply(router_instance.calculate_strong_win_rate)
+            return prompts.progress_apply(lambda p: router_instance.rank_models_for_prompt(p, self.model_set.models))
         elif router_instance.NO_PARALLEL:
-            return prompts.apply(router_instance.calculate_strong_win_rate)
+            return prompts.apply(lambda p: router_instance.rank_models_for_prompt(p, self.model_set.models))
         else:
-            return prompts.parallel_apply(router_instance.calculate_strong_win_rate)
+            return prompts.parallel_apply(lambda p: router_instance.rank_models_for_prompt(p, self.model_set.models))
 
     def route(self, prompt: str, router: str, threshold: float):
         self._validate_router_threshold(router, threshold)
-
-        return self.routers[router].route(prompt, threshold, self.model_pair)
-
+        return self.routers[router].route(prompt, threshold, self.model_set)
+    
     # Matches OpenAI's Chat Completions interface, but also supports optional router and threshold args
     # If model name is present, attempt to parse router and threshold using it, otherwise, use the router and threshold args
     def completion(
