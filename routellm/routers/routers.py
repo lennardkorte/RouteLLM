@@ -4,9 +4,20 @@ import random
 
 import numpy as np
 import torch
+import torch.nn as nn
+import pandas as pd
+import logging
+import torch.nn.functional as F
+
 from datasets import concatenate_datasets, load_dataset
 from huggingface_hub import hf_hub_download
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
+from torch.nn import TransformerEncoder, TransformerEncoderLayer
+
+logging.getLogger("sentence_transformers").setLevel(logging.ERROR)
+
+from sentence_transformers import SentenceTransformer
+from transformers import AutoConfig
 
 from routellm.routers.causal_llm.configs import RouterModelConfig
 from routellm.routers.causal_llm.llm_utils import (
@@ -253,52 +264,98 @@ class RandomRouter(Router):
         return random.uniform(0, 1)
 
 
+class TransformerClassifier(nn.Module):
+    def __init__(self, input_dim, hidden_dim=256, output_dim=5, nhead=8, nlayers=5):
+        super(TransformerClassifier, self).__init__()
+        encoder_layers = TransformerEncoderLayer(d_model=input_dim, nhead=nhead, dim_feedforward=hidden_dim)
+        self.transformer_encoder = TransformerEncoder(encoder_layers, num_layers=nlayers)
+        self.fc1 = nn.Linear(input_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, output_dim)
+
+    def forward(self, x):
+        x = self.transformer_encoder(x.unsqueeze(1))  # Add sequence dimension
+        x = torch.relu(self.fc1(x[:, -1, :]))  # Use the last token
+        return self.fc2(x)
+
+# Load the model
+model_path = "daparasyte/prompt_complexity_classifier_1"
+config = AutoConfig.from_pretrained(model_path)
+model = TransformerClassifier(input_dim=config.hidden_size)
+
+# Load weights
+model_weights_path = "/content/best_model.pt"  # Path to full model file
+model.load_state_dict(torch.load(model_weights_path, map_location="cpu"))
+
+# Save state_dict
+torch.save(model.state_dict(), "best_model_state_dict.pt")
+print("Model state_dict saved successfully!")
+
 class CostSensitiveRouter(Router):
+    def __init__(self, model_path="daparasyte/prompt_complexity_classifier_1", strong_model_cost=1.5, weak_model_cost=1.0):
+        super().__init__()
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.strong_model_cost = strong_model_cost
+        self.weak_model_cost = weak_model_cost
 
-    # Using random generation
-#    def calculate_strong_win_rate(self, prompt):
- #       win_rate = random.uniform(0, 1) 
-  #      print(f"Calculated win rate for prompt '{prompt}': {win_rate}")
-   #     return win_rate
+        # Load the embedding model
+        self.embedding_model = SentenceTransformer("jinaai/jina-embeddings-v3", trust_remote_code=True)
 
-    # Using a naive complexity scoring method 
+        # Initialize the complexity model
+        config = AutoConfig.from_pretrained(model_path)
+        self.prompt_complexity_model = TransformerClassifier(input_dim=config.hidden_size)
+
+        # Load the state_dict into the model
+        model_weights_path = "best_model_state_dict.pt"
+        self.prompt_complexity_model.load_state_dict(torch.load(model_weights_path, map_location=self.device))
+        self.prompt_complexity_model.to(self.device)
+        self.prompt_complexity_model.eval()
+
+    @staticmethod
+    def calculate_win_probabilities(prompt, embedding_model, complexity_model, device):
+        # Encode the prompt into embeddings
+        embedding = embedding_model.encode(prompt, convert_to_tensor=True).to(torch.float32).to(device)
+
+        # Directly use the preloaded complexity_model
+        with torch.no_grad():
+            embedding = embedding.unsqueeze(0)  # Add batch dimension
+            output = complexity_model(embedding)
+            probabilities = F.softmax(output, dim=1).cpu().numpy()[0]
+
+        # Calculate strong and weak win probabilities
+        strong_win = probabilities[0] + probabilities[1] + probabilities[2] / 2
+        weak_win = probabilities[2] / 2 + probabilities[3] + probabilities[4]
+        return strong_win, weak_win
+
+
     def calculate_strong_win_rate(self, prompt):
-        # Base win rate
-        base_win_rate = 0.5
+        strong_win, weak_win = self.calculate_win_probabilities(
+            prompt, self.embedding_model, self.prompt_complexity_model, self.device
+        )
+        print(f"Prompt: {prompt}")
+        print(f"Strong Win Probability: {strong_win}, Weak Win Probability: {weak_win}")
+        return strong_win
 
-        # Word count adjustment
-        word_count = len(prompt.split())
-        word_count_adjustment = 0.05 if word_count > 10 else 0
-
-        # Average word length adjustment
-        avg_word_length = sum(len(word) for word in prompt.split()) / word_count
-        word_length_adjustment = 0.05 if avg_word_length > 5 else 0
-
-        # Sentence count adjustment
-        sentence_count = prompt.count('.') + prompt.count('!') + prompt.count('?')
-        sentence_count_adjustment = 0.1 if sentence_count > 1 else 0
-
-        # Calculate the final win rate
-        win_rate = base_win_rate + word_count_adjustment + word_length_adjustment + sentence_count_adjustment
-        win_rate = min(win_rate, 1.0)  # Ensure win rate does not exceed 1.0
-
-        print(f"Calculated win rate for prompt '{prompt}': {win_rate}")
-        return win_rate
 
     def route(self, prompt, routed_pair):
         win_rate = self.calculate_strong_win_rate(prompt)
 
-        # Set a fixed threshold instead of dynamically adjusting it again
-        threshold = 0.5  # Adjust based on experimentation
+        # Determine prompt complexity and adjust the threshold dynamically
+        if win_rate < 0.3:
+            threshold = 0.7
+        elif win_rate < 0.6:
+            threshold = 0.5
+        else:
+            threshold = 0.4
 
-        print(f"Win rate: {win_rate}, Threshold: {threshold}")
+        # Adjust for cost sensitivity
+        cost_factor = self.weak_model_cost / self.strong_model_cost
+        threshold *= cost_factor
 
-        if win_rate >= threshold:
-            return routed_pair.strong
-        else:  
-            return routed_pair.weak
+        print(f"Prompt: {prompt}")
+        print(f"Win rate: {win_rate}")
+        print(f"Dynamic threshold (after cost adjustment): {threshold}")
 
-
+        return routed_pair.strong if win_rate >= threshold else routed_pair.weak
 ROUTER_CLS = {
     "random": RandomRouter,
     "mf": MatrixFactorizationRouter,

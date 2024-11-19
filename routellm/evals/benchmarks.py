@@ -8,6 +8,8 @@ from tqdm import tqdm
 
 from routellm.controller import Controller
 from routellm.routers.routers import Router
+from routellm.routers.routers import CostSensitiveRouter
+
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -309,24 +311,22 @@ class GSM8K(Benchmark):
             f"{len(self.all_data)}/{original_len} questions for GSM8K after decontamination."
         )
 
-    def evaluate(self, controller, router, num_results, overwrite_router_cache):
-#        if (
- #           router not in self.cache
-  #          or router in self.overwrite_cache
-   #         or overwrite_router_cache
-    #    ):
-        if True:
-            strong_win_rates = controller.batch_calculate_win_rate(
-                prompts=self.all_data["prompt"], router=router
+    def evaluate(self, controller, router_instance, num_results, overwrite_router_cache):
+        print(f"Router instance type: {type(router_instance)}")
+        if overwrite_router_cache or type(router_instance).__name__ not in self.cache:
+            strong_win_rates = self.all_data["prompt"].apply(
+                lambda p: router_instance.calculate_strong_win_rate(p)
             )
-            self.cache[router] = strong_win_rates
+            self.cache[type(router_instance).__name__] = strong_win_rates
             np.save(self.cache_path, self.cache)
         else:
-            strong_win_rates = self.cache[router]
+            strong_win_rates = self.cache[type(router_instance).__name__]
 
-        # Choose thresholds split into 10 equally sized bins (including duplicates)
-        #_, thresholds = pd.qcut(strong_win_rates, num_results, retbins=True)
-        _, thresholds = pd.qcut(strong_win_rates, num_results, retbins=True, duplicates="drop") # Handle naive cost sensitive router
+
+        print(f"Strong win rates calculated for router: {type(router_instance).__name__}")
+
+        # Process thresholds
+        _, thresholds = pd.qcut(strong_win_rates, num_results, retbins=True, duplicates="drop")
         self.all_data["strong_win_rates"] = strong_win_rates
 
         for i, threshold in enumerate(thresholds):
@@ -340,11 +340,10 @@ class GSM8K(Benchmark):
                 self.all_data[self.routed_pair.strong],
                 self.all_data[self.routed_pair.weak],
             )
-            models = np.where(selection, self.routed_pair.strong, self.routed_pair.weak)
+            models = np.where(selection, self.routed_pair.strong, self.all_data[self.routed_pair.weak])
             model_counts = Counter(models)
-            yield threshold, sum(results) / len(results) * 100, model_counts, len(
-                results
-            )
+            yield threshold, sum(results) / len(results) * 100, model_counts, len(results)
+
 
     def get_model_accuracy(self, model):
         df = self.all_data

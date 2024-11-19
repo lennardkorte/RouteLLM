@@ -11,7 +11,9 @@ from pandarallel import pandarallel
 from routellm.controller import Controller
 from routellm.evals.benchmarks import GSM8K, MMLU, MTBench
 from routellm.evals.mmlu.domains import ALL_MMLU_DOMAINS
-from routellm.routers.routers import ROUTER_CLS
+from routellm.routers.routers import CostSensitiveRouter, ROUTER_CLS
+
+
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -216,22 +218,20 @@ if __name__ == "__main__":
         raise ValueError(f"Invalid benchmark {args.benchmark}")
 
     all_results = pd.DataFrame()
-    for router in controller.routers:
-        # Ensure reproducibility on a per-router basis
-        random.seed(0)
-        # For non-deterministic routers like random, we average over multiple runs
-        if router in ["random"]:
+    # Ensure reproducibility on a per-router basis
+    random.seed(0)
+
+    for router_name in controller.routers:
+        if router_name == "random":  # Handle random router separately
             router_results = []
             for i in range(args.random_iters):
                 for threshold, accuracy, model_counts, total in benchmark.evaluate(
-                    controller, router, args.num_results, True
+                    controller, ROUTER_CLS[router_name](), args.num_results, True
                 ):
                     router_results.append(
                         {
                             "threshold": threshold,
-                            "strong_percentage": model_counts[
-                                controller.model_pair.strong
-                            ]
+                            "strong_percentage": model_counts[controller.model_pair.strong]
                             / total
                             * 100,
                             "accuracy": accuracy,
@@ -242,25 +242,58 @@ if __name__ == "__main__":
                 .groupby(["strong_percentage"], as_index=False)
                 .mean()
             )
-            router_results_df["method"] = str(router)
+            router_results_df["method"] = router_name  # Use the router name directly
             all_results = pd.concat([all_results, router_results_df])
         else:
             router_results = []
-            for threshold, accuracy, model_counts, total in benchmark.evaluate(
-                controller, router, args.num_results, False
-            ):
-                print(f"Evaluating router: {router} with threshold {threshold}...")
-                pretty_print_results(threshold, accuracy, model_counts, total)
 
+            # Dynamically instantiate the router instance from ROUTER_CLS
+            router_instance = ROUTER_CLS[router_name](
+                strong_model_cost=1.5, weak_model_cost=1.0
+            )
+            print(f"Using router: {type(router_instance).__name__}")
+
+            # Evaluate the benchmark with the instantiated router
+            for threshold, accuracy, model_counts, total in benchmark.evaluate(
+                controller, router_instance, args.num_results, args.overwrite_cache
+            ):
+                print(
+                    f"Evaluating router: {type(router_instance).__name__} with threshold {threshold}..."
+                )
+                print(
+                    f"Threshold: {threshold}, Accuracy: {accuracy}, Model Counts: {model_counts}"
+                )
+
+                # Calculate the percentage of prompts routed to each model
+                strong_model_percentage = (model_counts[controller.model_pair.strong] / total) * 100
+                weak_model_percentage = (model_counts[controller.model_pair.weak] / total) * 100
+
+                print(
+                    f"Strong Model Percentage: {strong_model_percentage:.2f}%, Weak Model Percentage: {weak_model_percentage:.2f}%"
+                )
+
+                # Collect results
                 result = {
-                    "method": str(router),
+                    "method": router_name,
                     "threshold": threshold,
-                    "strong_percentage": model_counts[controller.model_pair.strong]
-                    / total
-                    * 100,
+                    "strong_percentage": strong_model_percentage,
+                    "weak_percentage": weak_model_percentage,
                     "accuracy": accuracy,
                 }
                 router_results.append(result)
+            # Create a DataFrame from the router results
+            router_results_df = pd.DataFrame(router_results)
+
+            # Calculate overall averages for this router
+            average_strong_percentage = router_results_df["strong_percentage"].mean()
+            average_weak_percentage = router_results_df["weak_percentage"].mean()
+
+            print(
+                f"Overall Strong Model Usage for {type(router_instance).__name__}: {average_strong_percentage:.2f}%, "
+                f"Overall Weak Model Usage for {type(router_instance).__name__}: {average_weak_percentage:.2f}%"
+            )
+
+            # Append the results to all_results DataFrame
             all_results = pd.concat([all_results, pd.DataFrame(router_results)])
 
     generate_results(
@@ -270,3 +303,4 @@ if __name__ == "__main__":
         controller.model_pair,
         args.output,
     )
+
