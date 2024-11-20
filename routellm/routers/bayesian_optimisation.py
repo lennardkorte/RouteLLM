@@ -100,7 +100,7 @@ class BayesianOptimisation:
 
 if __name__ == "__main__":
     # Example usage
-    bayes_opt = BayesianOptimisation(benchmark_name="gsm8k")
+    bayes_opt = BayesianOptimisation(benchmark_name="mt-bench")
     opt_result = bayes_opt.run_optimization(n_calls=20)
 
 

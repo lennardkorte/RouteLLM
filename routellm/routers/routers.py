@@ -32,7 +32,6 @@ from routellm.routers.similarity_weighted.utils import (
     compute_tiers,
     preprocess_battles,
 )
-#from routellm.routers.bayesian_optimisation import BayesianOptimisationRouter
 
 def no_parallel(cls):
     cls.NO_PARALLEL = True
@@ -358,13 +357,21 @@ class CostSensitiveRouter(Router):
         return routed_pair.strong if win_rate >= threshold else routed_pair.weak
 
 class BayesianOptimisationRouter(CostSensitiveRouter):
-    def __init__(self, low_threshold, high_threshold, strong_model_cost, weak_model_cost, complexity_scaling):
+    def __init__(
+        self,
+        low_threshold=0.1,
+        high_threshold=1.0,
+        strong_model_cost=1.5,
+        weak_model_cost=1.0,
+        complexity_scaling=0.5,
+    ):
         super().__init__()
         self.low_threshold = low_threshold
         self.high_threshold = high_threshold
         self.strong_model_cost = strong_model_cost
         self.weak_model_cost = weak_model_cost
         self.complexity_scaling = complexity_scaling
+
 
     def calculate_prompt_complexity(self, prompt):
         """
@@ -384,32 +391,18 @@ class BayesianOptimisationRouter(CostSensitiveRouter):
         return probabilities[2]  # Example: Using the third class probability as complexity
 
     def route(self, prompt, routed_pair):
-        """
-        Route prompts dynamically based on thresholds optimized via Bayesian optimization.
-        """
-        # Calculate the complexity score of the prompt
+        # Scale complexity and calculate a dynamic threshold
         complexity_score = self.calculate_prompt_complexity(prompt)
+        dynamic_threshold = self.low_threshold + (complexity_score * self.complexity_scaling)
 
-        # Scale the complexity score and calculate a dynamic threshold
-        dynamic_threshold = self.low_threshold + (complexity_score * (self.high_threshold - self.low_threshold) * self.complexity_scaling)
-
-        # Adjust the threshold using cost sensitivity
+        # Apply cost sensitivity
         cost_factor = self.weak_model_cost / self.strong_model_cost
         dynamic_threshold *= cost_factor
 
-        # Ensure the threshold remains within bounds
-        dynamic_threshold = max(self.low_threshold, min(dynamic_threshold, self.high_threshold))
-
-        print(f"Prompt: {prompt}")
-        print(f"Complexity Score: {complexity_score}")
         print(f"Dynamic Threshold: {dynamic_threshold}")
-
-        # Calculate the win rate for the strong model
         win_rate = self.calculate_strong_win_rate(prompt)
 
-        # Route to the strong or weak model based on the calculated dynamic threshold
         return routed_pair.strong if win_rate >= dynamic_threshold else routed_pair.weak
-
 
 ROUTER_CLS = {
     "random": RandomRouter,

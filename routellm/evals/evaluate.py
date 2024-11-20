@@ -6,13 +6,15 @@ import numpy as np
 import pandas as pd
 import psutil
 import yaml
+import json
+import argparse
 from pandarallel import pandarallel
 
 from routellm.controller import Controller
 from routellm.evals.benchmarks import GSM8K, MMLU, MTBench
 from routellm.evals.mmlu.domains import ALL_MMLU_DOMAINS
 from routellm.routers.routers import CostSensitiveRouter, ROUTER_CLS
-from routellm.routers.bayesian_optimisation import BayesianOptimisationRouter
+from routellm.routers.routers import BayesianOptimisationRouter
 
 
 
@@ -73,8 +75,10 @@ def generate_results(
     plt.title(f"Router Performance ({benchmark_name})")
     plt.legend()
 
-    file_name = f"{output}/{benchmark_name}.png"
-    print("Saving plot to", file_name)
+
+    file_name = f"/content/RouteLLM/bo_{benchmark_name}.png"
+
+    print(f"Saving plot to {file_name}")
     plt.savefig(file_name, bbox_inches="tight")
 
     def pct_call_metric(row):
@@ -142,6 +146,22 @@ def pretty_print_results(threshold, accuracy, model_counts, total):
     )
     print("=" * len(header) + "\n")
 
+
+# For bayesian optimisation, load best parameters from file
+with open("best_params.json", "r") as f:
+    best_params = json.load(f)
+
+print("Loaded best parameters:", best_params)
+
+
+# Instantiate the BayesianOptimisationRouter
+router_instance = BayesianOptimisationRouter(
+    low_threshold=best_params["low_threshold"],
+    high_threshold=best_params["high_threshold"],
+    strong_model_cost=best_params["strong_model_cost"],
+    weak_model_cost=best_params["weak_model_cost"],
+    complexity_scaling=best_params["complexity_scaling"]
+)
 
 if __name__ == "__main__":
     import argparse
@@ -218,33 +238,15 @@ if __name__ == "__main__":
     else:
         raise ValueError(f"Invalid benchmark {args.benchmark}")
 
-    # Define the objective function for Bayesian Optimization
-    def objective(threshold):
-        router = BayesianOptimisationRouter(threshold=threshold[0], ...)
-        results = benchmark.evaluate(controller, router, ...)
-        accuracy = results["accuracy"]
-        return -accuracy  # Negative because we want to maximize accuracy
-
-    # Define the search space (e.g., thresholds between 0 and 1)
-    search_space = [(0.0, 1.0)]
-
-    # Perform Bayesian Optimization
-    from skopt import gp_minimize
-    result = gp_minimize(
-        func=objective,
-        dimensions=search_space,
-        n_calls=50,
-        random_state=42
-    )
-    print("Best parameters:", result.x)
-    print("Best performance:", -result.fun)
-
+    print(f"Evaluating routers on {args.benchmark}...")
 
     all_results = pd.DataFrame()
-    # Ensure reproducibility on a per-router basis
     random.seed(0)
 
-    for router_name in controller.routers:
+    # Routers to evaluate: random, cost_sensitive, and bayesian_optimisation
+    selected_routers = ["random", "cost_sensitive", "bayesian_optimisation"]
+
+    for router_name in selected_routers:
         if router_name == "random":  # Handle random router separately
             router_results = []
             for i in range(args.random_iters):
@@ -265,18 +267,17 @@ if __name__ == "__main__":
                 .groupby(["strong_percentage"], as_index=False)
                 .mean()
             )
-            router_results_df["method"] = router_name  # Use the router name directly
+            router_results_df["method"] = router_name
             all_results = pd.concat([all_results, router_results_df])
-        else:
+        elif router_name == "cost_sensitive":
             router_results = []
 
-            # Dynamically instantiate the router instance from ROUTER_CLS
+            # Instantiate the CostSensitiveRouter
             router_instance = ROUTER_CLS[router_name](
                 strong_model_cost=1.5, weak_model_cost=1.0
             )
             print(f"Using router: {type(router_instance).__name__}")
 
-            # Evaluate the benchmark with the instantiated router
             for threshold, accuracy, model_counts, total in benchmark.evaluate(
                 controller, router_instance, args.num_results, args.overwrite_cache
             ):
@@ -287,15 +288,13 @@ if __name__ == "__main__":
                     f"Threshold: {threshold}, Accuracy: {accuracy}, Model Counts: {model_counts}"
                 )
 
-                # Calculate the percentage of prompts routed to each model
-                strong_model_percentage = (model_counts[controller.model_pair.strong] / total) * 100
-                weak_model_percentage = (model_counts[controller.model_pair.weak] / total) * 100
+                strong_model_percentage = (
+                    model_counts[controller.model_pair.strong] / total
+                ) * 100
+                weak_model_percentage = (
+                    model_counts[controller.model_pair.weak] / total
+                ) * 100
 
-                print(
-                    f"Strong Model Percentage: {strong_model_percentage:.2f}%, Weak Model Percentage: {weak_model_percentage:.2f}%"
-                )
-
-                # Collect results
                 result = {
                     "method": router_name,
                     "threshold": threshold,
@@ -304,26 +303,61 @@ if __name__ == "__main__":
                     "accuracy": accuracy,
                 }
                 router_results.append(result)
-            # Create a DataFrame from the router results
             router_results_df = pd.DataFrame(router_results)
+            all_results = pd.concat([all_results, router_results_df])
+        elif router_name == "bayesian_optimisation":
+            router_results = []
 
-            # Calculate overall averages for this router
-            average_strong_percentage = router_results_df["strong_percentage"].mean()
-            average_weak_percentage = router_results_df["weak_percentage"].mean()
+            # Load best parameters for BayesianOptimisationRouter
+            with open("best_params.json", "r") as f:
+                best_params = json.load(f)
 
-            print(
-                f"Overall Strong Model Usage for {type(router_instance).__name__}: {average_strong_percentage:.2f}%, "
-                f"Overall Weak Model Usage for {type(router_instance).__name__}: {average_weak_percentage:.2f}%"
+            print("Loaded best parameters for BayesianOptimisationRouter:", best_params)
+
+            bayes_router = BayesianOptimisationRouter(
+                low_threshold=best_params["low_threshold"],
+                high_threshold=best_params["high_threshold"],
+                strong_model_cost=best_params["strong_model_cost"],
+                weak_model_cost=best_params["weak_model_cost"],
+                complexity_scaling=best_params["complexity_scaling"],
             )
 
-            # Append the results to all_results DataFrame
-            all_results = pd.concat([all_results, pd.DataFrame(router_results)])
+            print("Evaluating BayesianOptimisationRouter...")
+            for threshold, accuracy, model_counts, total in benchmark.evaluate(
+                controller, bayes_router, args.num_results, args.overwrite_cache
+            ):
+                print(
+                    f"Threshold: {threshold}, Accuracy: {accuracy}, Model Counts: {model_counts}"
+                )
+                router_results.append(
+                    {
+                        "method": router_name,
+                        "threshold": threshold,
+                        "strong_percentage": model_counts[controller.model_pair.strong]
+                        / total
+                        * 100,
+                        "weak_percentage": model_counts[controller.model_pair.weak]
+                        / total
+                        * 100,
+                        "accuracy": accuracy,
+                    }
+                )
+            router_results_df = pd.DataFrame(router_results)
+            all_results = pd.concat([all_results, router_results_df])
+    
+    output_dir = "/content/RouteLLM/"
 
+    # Define the output file name format
+    output_file = os.path.join(output_dir, f"bo_{args.benchmark}.png")
+
+    print(f"Saving results to {output_file}")
+
+    # Call the generate_results function with the updated output file path
     generate_results(
         all_results,
         benchmark,
         args.benchmark,
         controller.model_pair,
-        args.output,
+        output_file,  
     )
 
