@@ -12,6 +12,7 @@ from routellm.controller import Controller
 from routellm.evals.benchmarks import GSM8K, MMLU, MTBench
 from routellm.evals.mmlu.domains import ALL_MMLU_DOMAINS
 from routellm.routers.routers import CostSensitiveRouter, ROUTER_CLS
+from routellm.routers.bayesian_optimisation import BayesianOptimisationRouter
 
 
 
@@ -216,6 +217,28 @@ if __name__ == "__main__":
         benchmark = GSM8K(controller.model_pair, args.overwrite_cache)
     else:
         raise ValueError(f"Invalid benchmark {args.benchmark}")
+
+    # Define the objective function for Bayesian Optimization
+    def objective(threshold):
+        router = BayesianOptimisationRouter(threshold=threshold[0], ...)
+        results = benchmark.evaluate(controller, router, ...)
+        accuracy = results["accuracy"]
+        return -accuracy  # Negative because we want to maximize accuracy
+
+    # Define the search space (e.g., thresholds between 0 and 1)
+    search_space = [(0.0, 1.0)]
+
+    # Perform Bayesian Optimization
+    from skopt import gp_minimize
+    result = gp_minimize(
+        func=objective,
+        dimensions=search_space,
+        n_calls=50,
+        random_state=42
+    )
+    print("Best parameters:", result.x)
+    print("Best performance:", -result.fun)
+
 
     all_results = pd.DataFrame()
     # Ensure reproducibility on a per-router basis
