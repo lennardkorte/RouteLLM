@@ -76,22 +76,24 @@ class MMLU(Benchmark):
             f"Remaining {len(self.all_data)}/{original_length} prompts for MMLU after decontamination"
         )
 
-    def evaluate(self, controller, router, num_results, overwrite_router_cache):
-        if (
-            router not in self.cache
-            or router in self.overwrite_cache
-            or overwrite_router_cache
-        ):
-            strong_win_rates = controller.batch_calculate_win_rate(
-                prompts=self.all_data["prompt"], router=router
+    def evaluate(self, controller, router_instance, num_results, overwrite_router_cache):
+        print(f"Router instance type: {type(router_instance)}")  # Debugging: Print router type
+        if overwrite_router_cache or type(router_instance).__name__ not in self.cache:
+            # Use the router_instance's method to calculate strong win rates
+            strong_win_rates = self.all_data["prompt"].apply(
+                lambda p: router_instance.calculate_strong_win_rate(p)
             )
-            self.cache[router] = strong_win_rates
+            # Cache the computed strong win rates
+            self.cache[type(router_instance).__name__] = strong_win_rates
             np.save(self.cache_path, self.cache)
         else:
-            strong_win_rates = self.cache[router]
+            # Load cached strong win rates
+            strong_win_rates = self.cache[type(router_instance).__name__]
 
-        # Choose thresholds split into 10 equally sized bins (including duplicates)
-        _, thresholds = pd.qcut(strong_win_rates, num_results, retbins=True)
+        print(f"Strong win rates calculated for router: {type(router_instance).__name__}")
+
+        # Process thresholds
+        _, thresholds = pd.qcut(strong_win_rates, num_results, retbins=True, duplicates="drop")
         self.all_data["strong_win_rates"] = strong_win_rates
 
         for i, threshold in enumerate(thresholds):
@@ -108,12 +110,11 @@ class MMLU(Benchmark):
             models = np.where(
                 selection,
                 self.routed_pair.strong,
-                self.routed_pair.weak,
+                self.all_data[self.routed_pair.weak],
             )
             model_counts = Counter(models)
-            yield threshold, sum(results) / len(results) * 100, model_counts, len(
-                results
-            )
+            yield threshold, sum(results) / len(results) * 100, model_counts, len(results)
+
 
     def get_optimal_accuracy(self, strong_percent):
         df = self.all_data
@@ -169,54 +170,58 @@ class MTBench(Benchmark):
             print("Error loading MT Bench cache, starting fresh.")
             self.cache = {}
 
-    def evaluate(self, controller, router, num_results, overwrite_router_cache):
-        if (
-            router not in self.cache
-            or router in self.overwrite_cache
-            or overwrite_router_cache
-        ):
-            strong_win_rates = controller.batch_calculate_win_rate(
-                # Only use first turn for routing
-                prompts=self.questions["turns"].apply(lambda x: x[0]),
-                router=router,
+    def evaluate(self, controller, router_instance, num_results, overwrite_router_cache):
+        print(f"Router instance type: {type(router_instance)}")  # Debugging router type
+
+        # Cache handling
+        if overwrite_router_cache or type(router_instance).__name__ not in self.cache:
+            # Calculate strong win rates using the router instance
+            strong_win_rates = self.questions["turns"].apply(
+                lambda x: router_instance.calculate_strong_win_rate(x[0])  # Use the first turn for routing
             )
-            self.cache[router] = strong_win_rates
+            self.cache[type(router_instance).__name__] = strong_win_rates
             np.save(self.cache_path, self.cache)
         else:
-            strong_win_rates = self.cache[router]
+            strong_win_rates = self.cache[type(router_instance).__name__]
 
-        _, thresholds = pd.qcut(strong_win_rates, num_results, retbins=True)
-        questions = self.questions[["question_id", "turns"]]
-        questions["strong_win_rates"] = strong_win_rates
+        print(f"Strong win rates calculated for router: {type(router_instance).__name__}")
+
+        # Process thresholds
+        _, thresholds = pd.qcut(strong_win_rates, num_results, retbins=True, duplicates="drop")
+        self.questions["strong_win_rates"] = strong_win_rates
 
         for i, threshold in enumerate(thresholds):
-            questions["routed_model"] = np.where(
+            # Assign routed models based on threshold
+            self.questions["routed_model"] = np.where(
                 (
-                    questions["strong_win_rates"] >= threshold
+                    self.questions["strong_win_rates"] >= threshold
                     if i != len(thresholds) - 1
-                    else questions["strong_win_rates"] > threshold
+                    else self.questions["strong_win_rates"] > threshold
                 ),
                 self.routed_pair.strong,
                 self.routed_pair.weak,
             )
 
-            results = questions.merge(
+            # Merge with judgements to compute scores
+            results = self.questions.merge(
                 self.judgements,
                 left_on=["question_id", "routed_model"],
                 right_on=["question_id", "model"],
                 how="left",
             )[["question_id", "model", "score"]]
 
+            # Calculate average score
             score = results["score"].mean()
 
+            # Count how many prompts were routed to each model
             model_counts = results["model"].value_counts().to_dict()
             if self.routed_pair.weak not in model_counts:
                 model_counts[self.routed_pair.weak] = 0
             if self.routed_pair.strong not in model_counts:
                 model_counts[self.routed_pair.strong] = 0
 
+            # Ensure data consistency
             total = len(results)
-
             assert total == sum(model_counts.values()) == len(self.questions) * 2
 
             yield threshold, score, model_counts, total
