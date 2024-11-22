@@ -1,9 +1,9 @@
 # RouteLLM (Fork)
 ---
 We added our own project code under:
-/<joanns_code>
-/<aneeshs_code>
-/hard_metrics
+- /<joanns_code>
+- /<aneeshs_code>
+- /hard_metrics
 
 Furthermore, we uploaded our own project proposal which we took as a base for our project.
 
