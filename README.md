@@ -1,7 +1,7 @@
 # RouteLLM (Fork)
 ---
 We added our own project code under:
-- /dynamic_cost_threshold
+- /routellm/routers/routers.py > new class: CostSensitiveRouter 
 - /routellm/custom_router
 - /hard_metrics
 
