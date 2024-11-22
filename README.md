@@ -2,7 +2,7 @@
 ---
 We added our own project code under:
 - /dynamic_cost_threshold
-- /prompt-complexity-router
+- /routellm/custom_router
 - /hard_metrics
 
 Furthermore, we uploaded our own project proposal which we took as a base for our project.
